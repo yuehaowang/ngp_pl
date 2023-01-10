@@ -56,6 +56,8 @@ def get_opts():
                         help='evaluate lpips metric (consumes more VRAM)')
     parser.add_argument('--val_only', action='store_true', default=False,
                         help='run only validation (need to provide ckpt_path)')
+    parser.add_argument('--render_test_traj', action='store_true', default=False,
+                        help='whether to render test traj')
     parser.add_argument('--no_save_test', action='store_true', default=False,
                         help='whether to save test image and video')
 

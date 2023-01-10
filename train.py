@@ -109,11 +109,14 @@ class NeRFSystem(LightningModule):
 
         self.test_dataset = dataset(split='test', **kwargs)
 
-    def configure_optimizers(self):
+        self.exhibit_dataset = dataset(split='test_traj', **kwargs)
+
         # define additional parameters
         self.register_buffer('directions', self.train_dataset.directions.to(self.device))
         self.register_buffer('poses', self.train_dataset.poses.to(self.device))
 
+
+    def configure_optimizers(self):
         if self.hparams.optimize_ext:
             N = len(self.train_dataset.poses)
             self.register_parameter('dR',
@@ -190,6 +193,12 @@ class NeRFSystem(LightningModule):
             self.val_dir = f'results/{self.hparams.dataset_name}/{self.hparams.exp_name}'
             os.makedirs(self.val_dir, exist_ok=True)
 
+    def predict_dataloader(self):
+        return DataLoader(self.exhibit_dataset,
+                          num_workers=8,
+                          batch_size=None,
+                          pin_memory=True)
+
     def validation_step(self, batch, batch_nb):
         rgb_gt = batch['rgb']
         results = self(batch, split='test')
@@ -236,6 +245,23 @@ class NeRFSystem(LightningModule):
             mean_lpips = all_gather_ddp_if_available(lpipss).mean()
             self.log('test/lpips_vgg', mean_lpips)
 
+    def on_exhibit_start(self, suffix=''):
+        torch.cuda.empty_cache()
+
+        self.exhibit_dir = f'results_test_traj/{self.hparams.dataset_name}/{self.hparams.exp_name}'
+        os.makedirs(self.exhibit_dir, exist_ok=True)
+
+    def predict_step(self, batch, batch_nb):
+        results = self(batch, split='test')
+
+        w, h = self.train_dataset.img_wh
+        idx = batch['img_idxs']
+        rgb_pred = rearrange(results['rgb'].cpu().numpy(), '(h w) c -> h w c', h=h)
+        rgb_pred = (rgb_pred*255).astype(np.uint8)
+        depth = depth2img(rearrange(results['depth'].cpu().numpy(), '(h w) -> h w', h=h))
+        imageio.imsave(os.path.join(self.exhibit_dir, f'rgb_{idx:03d}.png'), rgb_pred)
+        imageio.imsave(os.path.join(self.exhibit_dir, f'depth_{idx:03d}.png'), depth)
+
     def get_progress_bar_dict(self):
         # don't show the version number
         items = super().get_progress_bar_dict()
@@ -273,9 +299,11 @@ if __name__ == '__main__':
                       num_sanity_val_steps=-1 if hparams.val_only else 0,
                       precision=16)
 
-    trainer.fit(system, ckpt_path=hparams.ckpt_path)
+    if not hparams.val_only:
+        # training
+        trainer.fit(system, ckpt_path=hparams.ckpt_path)
 
-    if not hparams.val_only: # save slimmed ckpt for the last epoch
+        # save slimmed ckpt for the last epoch
         ckpt_ = \
             slim_ckpt(f'ckpts/{hparams.dataset_name}/{hparams.exp_name}/epoch={hparams.num_epochs-1}.ckpt',
                       save_poses=hparams.optimize_ext)
@@ -290,4 +318,18 @@ if __name__ == '__main__':
                         fps=30, macro_block_size=1)
         imageio.mimsave(os.path.join(system.val_dir, 'depth.mp4'),
                         [imageio.imread(img) for img in imgs[1::2]],
+                        fps=30, macro_block_size=1)
+
+    # Render movie
+    if hparams.render_test_traj:
+        system.on_exhibit_start()
+        trainer.predict(system, ckpt_path=hparams.ckpt_path)
+
+        rgb_imgs = sorted(glob.glob(os.path.join(system.exhibit_dir, 'rgb_*.png')))
+        imageio.mimsave(os.path.join(system.exhibit_dir, 'video_rgb.mp4'),
+                        [imageio.imread(img) for img in rgb_imgs],
+                        fps=30, macro_block_size=1)
+        depth_imgs = sorted(glob.glob(os.path.join(system.exhibit_dir, 'depth_*.png')))
+        imageio.mimsave(os.path.join(system.exhibit_dir, 'video_depth.mp4'),
+                        [imageio.imread(img) for img in depth_imgs[1::2]],
                         fps=30, macro_block_size=1)
